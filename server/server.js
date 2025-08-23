@@ -10,7 +10,8 @@ app.use(express.json());
 app.use(cors({ origin: '*' }));
 
 // ====== БД (SQLite) ======
-const db = new Database('data.db');
+const DB_FILE = process.env.DB_FILE || './data.db';
+const db = new Database(DB_FILE);
 db.pragma('journal_mode = WAL');
 
 // Базовые таблицы
