@@ -53,19 +53,24 @@ function ensureColumn(table, name, type) {
 ensureColumn('schedules', 'altHour', 'INTEGER');
 ensureColumn('schedules', 'altMinute', 'INTEGER');
 ensureColumn('schedules', 'altDaysOfWeek', 'TEXT'); // JSON-массив, напр. [0,6]
+ensureColumn('devices', 'store', 'TEXT');  // 'gp' | 'rustore'
+ensureColumn('devices', 'appId', 'TEXT');  // com.rosenbergvictor72.verbify[.ru]
 
 // ====== prepared statements ======
 const upsertDevice = db.prepare(`
-  INSERT INTO devices (userId, expoPushToken, language, tz, utcOffsetMin, appVersion, updatedAt)
-  VALUES (@userId, @expoPushToken, @language, @tz, @utcOffsetMin, @appVersion, @updatedAt)
+  INSERT INTO devices (userId, expoPushToken, language, tz, utcOffsetMin, appVersion, updatedAt, store, appId)
+  VALUES (@userId, @expoPushToken, @language, @tz, @utcOffsetMin, @appVersion, @updatedAt, @store, @appId)
   ON CONFLICT(userId) DO UPDATE SET
     expoPushToken=excluded.expoPushToken,
     language=excluded.language,
     tz=excluded.tz,
     utcOffsetMin=excluded.utcOffsetMin,
     appVersion=excluded.appVersion,
-    updatedAt=excluded.updatedAt
+    updatedAt=excluded.updatedAt,
+    store=excluded.store,
+    appId=excluded.appId
 `);
+
 
 const upsertSchedule = db.prepare(`
   INSERT INTO schedules (userId, hour, minute, daysOfWeek, lastSentKey, updatedAt)
@@ -242,6 +247,8 @@ app.post('/registerDevice', (req, res) => {
     utcOffsetMin: Number.isFinite(utcOffsetMin) ? utcOffsetMin : 0,
     appVersion: appVersion || 'unknown',
     updatedAt: new Date().toISOString(),
+    store: store || null,
+    appId: appId || null,
   });
 
   res.json({ ok: true });
