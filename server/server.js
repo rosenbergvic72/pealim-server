@@ -67,6 +67,13 @@ ensureColumn('schedules', 'altDaysOfWeek', 'TEXT');
 ensureColumn('devices', 'store', 'TEXT');
 ensureColumn('devices', 'appId', 'TEXT');
 
+// === определить магазин по applicationId
+function inferStore(appId) {
+  if (!appId) return null;
+  // всё, что заканчивается на ".ru" — считаем RuStore
+  return appId.endsWith('.ru') ? 'rustore' : 'gp';
+}
+
 // ====== prepared statements ======
 const upsertDevice = db.prepare(`
   INSERT INTO devices (userId, expoPushToken, language, tz, utcOffsetMin, appVersion, updatedAt, store, appId)
@@ -244,15 +251,25 @@ async function processDueNow() {
 // healthcheck
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
-// регистрация девайса/токена
+// регистрация девайса/токена (ЕДИНСТВЕННЫЙ обработчик)
 app.post('/registerDevice', (req, res) => {
   try {
-    const {
+    let {
       userId, expoPushToken, language, tz, utcOffsetMin, appVersion,
       store, appId
     } = req.body || {};
+
     if (!userId || !expoPushToken) {
       return res.status(400).json({ error: 'userId and expoPushToken are required' });
+    }
+
+    // вычисляем store по appId и при рассинхроне переопределяем
+    const inferred = inferStore(appId);
+    if (!store || (inferred && store !== inferred)) {
+      if (store && inferred && store !== inferred) {
+        console.warn('[registerDevice] store/appId mismatch -> override', { store, appId, inferred });
+      }
+      store = inferred;
     }
 
     upsertDevice.run({
@@ -335,7 +352,7 @@ app.post('/activity/mark', (req, res) => {
   res.json({ ok: true, ymd });
 });
 
-// отладка
+// отладка: полный дамп
 app.get('/debug/all', (_req, res) => {
   const devs = db.prepare('SELECT * FROM devices').all();
   const sch = db.prepare('SELECT * FROM schedules').all();
