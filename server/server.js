@@ -180,6 +180,8 @@ async function processDueNow() {
   const rows = getAllDueJoin.all();
 
   const toSend = [];
+  const recipients = []; // кого шлём
+  const batches = [];    // ответы Expo по батчам
   for (const row of rows) {
     // локальное время пользователя
     const tz = row.tz || 'UTC';
@@ -232,6 +234,7 @@ async function processDueNow() {
     });
 
     setLastSentKey.run(sentKey, new Date().toISOString(), row.userId);
+    recipients.push({ userId: row.userId, token: row.expoPushToken, tz, sentKey });
   }
 
   // отправляем батчами по 100
@@ -240,10 +243,11 @@ async function processDueNow() {
     const batch = toSend.slice(i, i + CHUNK);
     const res = await sendExpoBatch(batch);
     console.log(`[PUSH] batch sent=${res.sent} status=${res.status}`);
+    batches.push({ ok: res.ok, status: res.status, expo: res.data });
     if (!res.ok) console.error('[PUSH] error payload:', res.data);
   }
 
-  return { matched: toSend.length };
+  return { matched: toSend.length, recipients, batches };
 }
 
 // ====== API ======
