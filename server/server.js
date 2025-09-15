@@ -105,6 +105,7 @@ const updateAltSchedule = db.prepare(`
   WHERE userId=@userId
 `);
 
+const getScheduleExists = db.prepare(`SELECT 1 FROM schedules WHERE userId=?`);
 const deleteSchedule = db.prepare(`DELETE FROM schedules WHERE userId=?`);
 
 const getAllDueJoin = db.prepare(`
@@ -127,6 +128,13 @@ const markActivity = db.prepare(`
 const hasActivityToday = db.prepare(`
   SELECT 1 FROM activity WHERE userId=? AND ymd=?
 `);
+
+// ====== дефолтные окна (автосоздание при первой регистрации) ======
+const AUTOSCHEDULE_BASE = (process.env.AUTOSCHEDULE_BASE ?? 'true') === 'true';
+const AUTOSCHEDULE_ALT  = (process.env.AUTOSCHEDULE_ALT  ?? 'true') === 'true';
+
+const DEFAULT_BASE = { hour: 19, minute: 45, daysOfWeek: null };   // каждый день
+const DEFAULT_ALT  = { hour: 10, minute: 45, daysOfWeek: [5] };     // пятница
 
 // ====== локализация текста уведомления ======
 function buildMessage(language = 'english') {
@@ -180,23 +188,19 @@ async function processDueNow() {
   const rows = getAllDueJoin.all();
 
   const toSend = [];
-  const recipients = []; // кого шлём
-  const batches = [];    // ответы Expo по батчам
+  const recipients = [];
+  const batches = [];
   for (const row of rows) {
-    // локальное время пользователя
     const tz = row.tz || 'UTC';
     let local = nowUtc.setZone(tz);
     if (!local.isValid) local = nowUtc;
 
-    // день недели 0..6 (вс=0 .. сб=6)
     const dow06 = local.weekday % 7; // Luxon: Mon..Sun = 1..7 → 1..6,0
 
-    // базовые и альтернативные дни
     let baseDays = null, altDays = null;
     if (row.daysOfWeek)    { try { baseDays = JSON.parse(row.daysOfWeek); }    catch {} }
     if (row.altDaysOfWeek) { try { altDays  = JSON.parse(row.altDaysOfWeek); } catch {} }
 
-    // выбираем целевое окно (alt приоритетнее, если сегодня его день)
     let targetHour = row.hour;
     let targetMinute = row.minute;
 
@@ -207,18 +211,14 @@ async function processDueNow() {
       targetHour = Number(row.altHour);
       targetMinute = Number(row.altMinute);
     } else if (Array.isArray(baseDays) && baseDays.length && !baseDays.includes(dow06)) {
-      // базовое окно не "каждый день" и сегодня не входит
       continue;
     }
 
-    // если пользователь уже занимался сегодня — пропускаем
     const ymd = local.toFormat('yyyy-LL-dd');
     if (hasActivityToday.get(row.userId, ymd)) continue;
 
-    // совпала ли минута
     if (local.hour !== targetHour || local.minute !== targetMinute) continue;
 
-    // защита от дублей
     const sentKey = local.toFormat("yyyy-LL-dd'T'HH:mm");
     if (row.lastSentKey === sentKey) continue;
 
@@ -237,7 +237,6 @@ async function processDueNow() {
     recipients.push({ userId: row.userId, token: row.expoPushToken, tz, sentKey });
   }
 
-  // отправляем батчами по 100
   const CHUNK = 100;
   for (let i = 0; i < toSend.length; i += CHUNK) {
     const batch = toSend.slice(i, i + CHUNK);
@@ -288,6 +287,35 @@ app.post('/registerDevice', (req, res) => {
       appId: appId || null,
     });
 
+    // ⬇️ АВТОДЕФОЛТНОЕ РАСПИСАНИЕ ДЛЯ НОВЫХ userId
+    const exists = getScheduleExists.get(userId);
+    if (!exists && AUTOSCHEDULE_BASE) {
+      upsertSchedule.run({
+        userId,
+        hour: Math.max(0, Math.min(23, Number(DEFAULT_BASE.hour))),
+        minute: Math.max(0, Math.min(59, Number(DEFAULT_BASE.minute))),
+        daysOfWeek: DEFAULT_BASE.daysOfWeek ? JSON.stringify(DEFAULT_BASE.daysOfWeek) : null,
+        lastSentKey: null,
+        updatedAt: new Date().toISOString(),
+      });
+      console.log('[registerDevice] default base schedule created', {
+        userId, hour: DEFAULT_BASE.hour, minute: DEFAULT_BASE.minute, daysOfWeek: DEFAULT_BASE.daysOfWeek
+      });
+
+      if (AUTOSCHEDULE_ALT && DEFAULT_ALT && Number.isFinite(DEFAULT_ALT.hour) && Number.isFinite(DEFAULT_ALT.minute)) {
+        updateAltSchedule.run({
+          userId,
+          altHour: Math.max(0, Math.min(23, Number(DEFAULT_ALT.hour))),
+          altMinute: Math.max(0, Math.min(59, Number(DEFAULT_ALT.minute))),
+          altDaysOfWeek: JSON.stringify(DEFAULT_ALT.daysOfWeek ?? [5]),
+          updatedAt: new Date().toISOString(),
+        });
+        console.log('[registerDevice] default ALT schedule created', {
+          userId, hour: DEFAULT_ALT.hour, minute: DEFAULT_ALT.minute, daysOfWeek: DEFAULT_ALT.daysOfWeek
+        });
+      }
+    }
+
     res.json({ ok: true });
   } catch (e) {
     console.error('[registerDevice] error:', e);
@@ -321,7 +349,7 @@ app.post('/schedule/weekend', (req, res) => {
     return res.status(400).json({ error: 'userId, hour, minute required' });
   }
 
-  const exists = db.prepare('SELECT 1 FROM schedules WHERE userId=?').get(userId);
+  const exists = getScheduleExists.get(userId);
   if (!exists) return res.status(404).json({ error: 'base schedule not found' });
 
   updateAltSchedule.run({
