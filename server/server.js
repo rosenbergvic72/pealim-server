@@ -11,7 +11,7 @@ const app = express();
 app.use(express.json());
 app.use(cors({ origin: '*' }));
 
-// ====== БД (SQLite) ======
+/* ===================== БД (SQLite) ===================== */
 const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'data', 'data.db');
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 console.log('[DB] using', DB_PATH);
@@ -38,14 +38,13 @@ db.exec(`
     hour INTEGER NOT NULL,
     minute INTEGER NOT NULL,
     daysOfWeek TEXT,      -- JSON [0..6] или NULL (каждый день)
-    lastSentKey TEXT,     -- 'YYYY-MM-DDTHH:mm' в локальной TZ пользователя
+    lastSentKey TEXT,     -- 'YYYY-MM-DD@HH:mm[#alt]'
     updatedAt TEXT,
     altHour INTEGER,
     altMinute INTEGER,
     altDaysOfWeek TEXT    -- JSON-массив, напр. [0,6]
   );
 
-  -- факты активности (день засчитан)
   CREATE TABLE IF NOT EXISTS activity (
     userId TEXT NOT NULL,
     ymd TEXT NOT NULL,    -- YYYY-MM-DD в локальной TZ пользователя
@@ -54,27 +53,52 @@ db.exec(`
   );
 `);
 
-// Мягкая миграция (на случай старой БД)
+// Мягкие миграции на случай старой БД
 function ensureColumn(table, name, type) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
-  if (!cols.includes(name)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
-  }
+  if (!cols.includes(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
 }
 ensureColumn('schedules', 'altHour', 'INTEGER');
 ensureColumn('schedules', 'altMinute', 'INTEGER');
 ensureColumn('schedules', 'altDaysOfWeek', 'TEXT');
-ensureColumn('devices', 'store', 'TEXT');
-ensureColumn('devices', 'appId', 'TEXT');
+ensureColumn('devices',   'store', 'TEXT');
+ensureColumn('devices',   'appId', 'TEXT');
 
-// === определить магазин по applicationId
+/* ===================== Утилиты ===================== */
+
+// определить магазин по applicationId
 function inferStore(appId) {
   if (!appId) return null;
-  // всё, что заканчивается на ".ru" — считаем RuStore
   return appId.endsWith('.ru') ? 'rustore' : 'gp';
 }
 
-// ====== prepared statements ======
+// локализация текста уведомления
+function buildMessage(language = 'english') {
+  switch ((language || '').toLowerCase()) {
+    case 'русский':
+    case 'ru':
+      return { title: 'Это Verbify!', body: 'Не забудь потренироваться!\nСегодня практика — завтра уверенность! 💪' };
+    case 'français':
+    case 'fr':
+      return { title: 'C’est Verbify !', body: 'N’oublie pas de t’entraîner !\nAujourd’hui entraînement — demain confiance ! 💪' };
+    case 'español':
+    case 'es':
+      return { title: '¡Esto es Verbify!', body: '¡No olvides practicar!\n¡Hoy práctica — mañana confianza! 💪' };
+    case 'português':
+    case 'pt':
+      return { title: 'Este é o Verbify!', body: 'Não se esqueça de praticar!\nHoje prática — amanhã confiança! 💪' };
+    case 'العربية':
+    case 'ar':
+      return { title: 'هذا هو Verbify!', body: 'لا تنسَ التدرّب!\nتمرّن اليوم — ثقة غدًا! 💪' };
+    case 'አማርኛ':
+    case 'am':
+      return { title: 'ይህ Verbify ነው!', body: 'ማስተማርን አትርሳ!\nዛሬ ማስተማር — ነገ እምነት! 💪' };
+    default:
+      return { title: 'This is Verbify!', body: 'Don’t forget to practice!\nPractice today — confidence tomorrow! 💪' };
+  }
+}
+
+/* ===================== Prepared statements ===================== */
 const upsertDevice = db.prepare(`
   INSERT INTO devices (userId, expoPushToken, language, tz, utcOffsetMin, appVersion, updatedAt, store, appId)
   VALUES (@userId, @expoPushToken, @language, @tz, @utcOffsetMin, @appVersion, @updatedAt, @store, @appId)
@@ -106,7 +130,7 @@ const updateAltSchedule = db.prepare(`
 `);
 
 const getScheduleExists = db.prepare(`SELECT 1 FROM schedules WHERE userId=?`);
-const deleteSchedule = db.prepare(`DELETE FROM schedules WHERE userId=?`);
+const deleteSchedule    = db.prepare(`DELETE FROM schedules WHERE userId=?`);
 
 const getAllDueJoin = db.prepare(`
   SELECT s.userId, s.hour, s.minute, s.daysOfWeek, s.lastSentKey,
@@ -116,57 +140,29 @@ const getAllDueJoin = db.prepare(`
   JOIN devices d ON d.userId = s.userId
 `);
 
-const setLastSentKey = db.prepare(`
-  UPDATE schedules SET lastSentKey=?, updatedAt=? WHERE userId=?
-`);
+const setLastSentKey = db.prepare(`UPDATE schedules SET lastSentKey=?, updatedAt=? WHERE userId=?`);
 
 const markActivity = db.prepare(`
   INSERT OR REPLACE INTO activity (userId, ymd, updatedAt)
   VALUES (@userId, @ymd, @updatedAt)
 `);
 
-const hasActivityToday = db.prepare(`
-  SELECT 1 FROM activity WHERE userId=? AND ymd=?
-`);
+const hasActivityToday = db.prepare(`SELECT 1 FROM activity WHERE userId=? AND ymd=?`);
 
-// ====== дефолтные окна (автосоздание при первой регистрации) ======
+/* ===================== Дефолтные окна ===================== */
 const AUTOSCHEDULE_BASE = (process.env.AUTOSCHEDULE_BASE ?? 'true') === 'true';
 const AUTOSCHEDULE_ALT  = (process.env.AUTOSCHEDULE_ALT  ?? 'true') === 'true';
 
-const DEFAULT_BASE = { hour: 19, minute: 45, daysOfWeek: null };   // каждый день
-const DEFAULT_ALT  = { hour: 10, minute: 45, daysOfWeek: [5] };     // пятница
+const DEFAULT_BASE = { hour: 19, minute: 45, daysOfWeek: null }; // каждый день
+const DEFAULT_ALT  = { hour: 10, minute: 45, daysOfWeek: [5] };  // пятница
 
-// ====== локализация текста уведомления ======
-function buildMessage(language = 'english') {
-  switch ((language || '').toLowerCase()) {
-    case 'русский':
-    case 'ru':
-      return { title: 'Это Verbify!', body: 'Не забудь потренироваться!\nСегодня практика — завтра уверенность! 💪' };
-    case 'français':
-    case 'fr':
-      return { title: 'C’est Verbify !', body: 'N’oublie pas de t’entraîner !\nAujourd’hui entraînement — demain confiance ! 💪' };
-    case 'español':
-    case 'es':
-      return { title: '¡Esto es Verbify!', body: '¡No olvides practicar!\n¡Hoy práctica — mañana confianza! 💪' };
-    case 'português':
-    case 'pt':
-      return { title: 'Este é o Verbify!', body: 'Não se esqueça de praticar!\nHoje prática — amanhã confiança! 💪' };
-    case 'العربية':
-    case 'ar':
-      return { title: 'هذا هو Verbify!', body: 'لا تنسَ التدرّب!\nتمرّن اليوم — ثقة غدًا! 💪' };
-    case 'አማርኛ':
-    case 'am':
-      return { title: 'ይህ Verbify ነው!', body: 'ማስተማርን አትርሳ!\nዛሬ ማስተማር — ነገ እምነት! 💪' };
-    default:
-      return { title: 'This is Verbify!', body: 'Don’t forget to practice!\nPractice today — confidence tomorrow! 💪' };
-  }
-}
+/* ===================== Expo push ===================== */
+const EXPO_PUSH_ENDPOINT = process.env.EXPO_PUSH_ENDPOINT || 'https://exp.host/--/api/v2/push/send';
 
-// ====== отправка пачки в Expo Push ======
 async function sendExpoBatch(messages) {
-  if (!messages.length) return { ok: true, status: 200, sent: 0 };
+  if (!messages.length) return { ok: true, status: 200, data: { data: [] }, sent: 0 };
 
-  const resp = await fetch('https://exp.host/--/api/v2/push/send', {
+  const resp = await fetch(EXPO_PUSH_ENDPOINT, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -178,95 +174,136 @@ async function sendExpoBatch(messages) {
 
   const data = await resp.json().catch(() => ({}));
   console.log('[PUSH] status=', resp.status, 'resp=', JSON.stringify(data));
-
   return { ok: resp.ok, status: resp.status, data, sent: messages.length };
 }
 
-// ====== проверка «к кому пора» и отправка ======
+/* ===================== Планировщик (cron) ===================== */
+// окно допуска по времени (в минутах, с плавающей дробью)
+const MINUTE_TOLERANCE = Number(process.env.MINUTE_TOLERANCE ?? '1.5');
+
+function makeSentKey(local, targetHour, targetMinute, useAlt) {
+  return `${local.toFormat('yyyy-LL-dd')}@${String(targetHour).padStart(2, '0')}:${String(targetMinute).padStart(2, '0')}${useAlt ? '#alt' : ''}`;
+}
+
 async function processDueNow() {
   const nowUtc = DateTime.utc();
   const rows = getAllDueJoin.all();
 
-  const toSend = [];
-  const recipients = [];
-  const batches = [];
+  // Кандидаты на отправку и соответствующий «мэппинг» для пост-обработки
+  const messages = [];           // payload для Expo
+  const mapping  = [];           // индекс -> {userId, sentKey}
+
   for (const row of rows) {
+    // локальное время пользователя
     const tz = row.tz || 'UTC';
     let local = nowUtc.setZone(tz);
     if (!local.isValid) local = nowUtc;
 
-    const dow06 = local.weekday % 7; // Luxon: Mon..Sun = 1..7 → 1..6,0
+    // 0..6 (вс=0)
+    const dow06 = local.weekday % 7;
 
+    // парсим списки дней
     let baseDays = null, altDays = null;
     if (row.daysOfWeek)    { try { baseDays = JSON.parse(row.daysOfWeek); }    catch {} }
     if (row.altDaysOfWeek) { try { altDays  = JSON.parse(row.altDaysOfWeek); } catch {} }
 
-    let targetHour = row.hour;
-    let targetMinute = row.minute;
+    // базовая цель
+    let targetHour = Number(row.hour);
+    let targetMinute = Number(row.minute);
+    let useAlt = false;
 
+    // если alt-окно активно в этот день — переключаемся на него
     const hasAltWindow = Array.isArray(altDays) && altDays.includes(dow06)
-      && row.altHour != null && row.altMinute != null;
+                      && row.altHour != null && row.altMinute != null;
 
     if (hasAltWindow) {
       targetHour = Number(row.altHour);
       targetMinute = Number(row.altMinute);
+      useAlt = true;
     } else if (Array.isArray(baseDays) && baseDays.length && !baseDays.includes(dow06)) {
-      continue;
+      continue; // день не в базовом расписании
     }
 
+    // пропуск, если уже занимался сегодня
     const ymd = local.toFormat('yyyy-LL-dd');
     if (hasActivityToday.get(row.userId, ymd)) continue;
 
-    if (local.hour !== targetHour || local.minute !== targetMinute) continue;
+    // проверка по окну допуска
+    const target = local.set({ hour: targetHour, minute: targetMinute, second: 0, millisecond: 0 });
+    const diffMin = Math.abs(local.diff(target, 'minutes').minutes);
+    if (diffMin > MINUTE_TOLERANCE) continue;
 
-    const sentKey = local.toFormat("yyyy-LL-dd'T'HH:mm");
+    // защита от дублей того же слота
+    const sentKey = makeSentKey(local, targetHour, targetMinute, useAlt);
     if (row.lastSentKey === sentKey) continue;
 
-    const msg = buildMessage(row.language);
-    toSend.push({
+    // формируем сообщение
+    const msgText = buildMessage(row.language);
+    messages.push({
       to: row.expoPushToken,
       sound: 'default',
-      title: msg.title,
-      body: msg.body,
+      title: msgText.title,
+      body: msgText.body,
       data: { kind: 'daily-reminder', ts: nowUtc.toISO() },
       priority: 'high',
       channelId: 'default',
     });
-
-    setLastSentKey.run(sentKey, new Date().toISOString(), row.userId);
-    recipients.push({ userId: row.userId, token: row.expoPushToken, tz, sentKey });
+    mapping.push({ userId: row.userId, sentKey });
   }
 
+  // Отправка батчами и пост-обновление lastSentKey ТОЛЬКО для success
   const CHUNK = 100;
-  for (let i = 0; i < toSend.length; i += CHUNK) {
-    const batch = toSend.slice(i, i + CHUNK);
+  const batches = [];
+  let matched = messages.length;
+
+  for (let i = 0; i < messages.length; i += CHUNK) {
+    const batch = messages.slice(i, i + CHUNK);
+    const map   = mapping.slice(i, i + CHUNK);
+
     const res = await sendExpoBatch(batch);
-    console.log(`[PUSH] batch sent=${res.sent} status=${res.status}`);
+    console.log(`[PUSH] batch size=${batch.length} status=${res.status}`);
     batches.push({ ok: res.ok, status: res.status, expo: res.data });
-    if (!res.ok) console.error('[PUSH] error payload:', res.data);
+
+    if (!res.ok || !res.data || !Array.isArray(res.data.data)) {
+      console.error('[PUSH] expo send failed or unexpected response format');
+      continue;
+    }
+
+    const results = res.data.data; // массив по порядку
+    const nowIso = new Date().toISOString();
+
+    for (let k = 0; k < results.length; k++) {
+      const r = results[k];
+      const m = map[k];
+      if (!m) continue; // на всякий случай
+
+      if (r && r.status === 'ok') {
+        // успешно — фиксируем lastSentKey
+        setLastSentKey.run(m.sentKey, nowIso, m.userId);
+      } else {
+        // ошибка — логируем, НЕ ставим lastSentKey (чтобы повторить позже)
+        console.warn('[PUSH] send error for userId=', m.userId, 'resp=', r);
+      }
+    }
   }
 
-  return { matched: toSend.length, recipients, batches };
+  return { matched, batches };
 }
 
-// ====== API ======
+/* ===================== API ===================== */
 
 // healthcheck
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
-// регистрация девайса/токена (ЕДИНСТВЕННЫЙ обработчик)
+// регистрация девайса (единая точка)
 app.post('/registerDevice', (req, res) => {
   try {
-    let {
-      userId, expoPushToken, language, tz, utcOffsetMin, appVersion,
-      store, appId
-    } = req.body || {};
-
+    let { userId, expoPushToken, language, tz, utcOffsetMin, appVersion, store, appId } = req.body || {};
     if (!userId || !expoPushToken) {
       return res.status(400).json({ error: 'userId and expoPushToken are required' });
     }
 
-    // вычисляем store по appId и при рассинхроне переопределяем
+    // сверяем магазин с applicationId
     const inferred = inferStore(appId);
     if (!store || (inferred && store !== inferred)) {
       if (store && inferred && store !== inferred) {
@@ -287,7 +324,7 @@ app.post('/registerDevice', (req, res) => {
       appId: appId || null,
     });
 
-    // ⬇️ АВТОДЕФОЛТНОЕ РАСПИСАНИЕ ДЛЯ НОВЫХ userId
+    // при первой регистрации — автосоздаём дефолтные окна
     const exists = getScheduleExists.get(userId);
     if (!exists && AUTOSCHEDULE_BASE) {
       upsertSchedule.run({
@@ -298,11 +335,9 @@ app.post('/registerDevice', (req, res) => {
         lastSentKey: null,
         updatedAt: new Date().toISOString(),
       });
-      console.log('[registerDevice] default base schedule created', {
-        userId, hour: DEFAULT_BASE.hour, minute: DEFAULT_BASE.minute, daysOfWeek: DEFAULT_BASE.daysOfWeek
-      });
+      console.log('[registerDevice] default base schedule created', DEFAULT_BASE);
 
-      if (AUTOSCHEDULE_ALT && DEFAULT_ALT && Number.isFinite(DEFAULT_ALT.hour) && Number.isFinite(DEFAULT_ALT.minute)) {
+      if (AUTOSCHEDULE_ALT && Number.isFinite(DEFAULT_ALT.hour) && Number.isFinite(DEFAULT_ALT.minute)) {
         updateAltSchedule.run({
           userId,
           altHour: Math.max(0, Math.min(23, Number(DEFAULT_ALT.hour))),
@@ -310,9 +345,7 @@ app.post('/registerDevice', (req, res) => {
           altDaysOfWeek: JSON.stringify(DEFAULT_ALT.daysOfWeek ?? [5]),
           updatedAt: new Date().toISOString(),
         });
-        console.log('[registerDevice] default ALT schedule created', {
-          userId, hour: DEFAULT_ALT.hour, minute: DEFAULT_ALT.minute, daysOfWeek: DEFAULT_ALT.daysOfWeek
-        });
+        console.log('[registerDevice] default ALT schedule created', DEFAULT_ALT);
       }
     }
 
@@ -329,26 +362,23 @@ app.post('/schedule', (req, res) => {
   if (!userId || hour == null || minute == null) {
     return res.status(400).json({ error: 'userId, hour, minute required' });
   }
-
-  const payload = {
+  upsertSchedule.run({
     userId,
     hour: Math.max(0, Math.min(23, Number(hour))),
     minute: Math.max(0, Math.min(59, Number(minute))),
     daysOfWeek: daysOfWeek ? JSON.stringify(daysOfWeek) : null,
     lastSentKey: null,
     updatedAt: new Date().toISOString(),
-  };
-  upsertSchedule.run(payload);
+  });
   res.json({ ok: true });
 });
 
-// задать альтернативное окно (например, выходные или пятница)
+// задать альтернативное окно
 app.post('/schedule/weekend', (req, res) => {
   const { userId, hour, minute, daysOfWeek } = req.body || {};
   if (!userId || hour == null || minute == null) {
     return res.status(400).json({ error: 'userId, hour, minute required' });
   }
-
   const exists = getScheduleExists.get(userId);
   if (!exists) return res.status(404).json({ error: 'base schedule not found' });
 
@@ -359,7 +389,6 @@ app.post('/schedule/weekend', (req, res) => {
     altDaysOfWeek: JSON.stringify(daysOfWeek ?? [0, 6]),
     updatedAt: new Date().toISOString(),
   });
-
   res.json({ ok: true });
 });
 
@@ -369,7 +398,7 @@ app.delete('/schedule/:userId', (req, res) => {
   res.json({ ok: true });
 });
 
-// отметить, что "сегодня занимался"
+// отметить активность «сегодня занимался»
 app.post('/activity/mark', (req, res) => {
   const { userId } = req.body || {};
   if (!userId) return res.status(400).json({ error: 'userId required' });
@@ -387,12 +416,12 @@ app.post('/activity/mark', (req, res) => {
 // отладка: полный дамп
 app.get('/debug/all', (_req, res) => {
   const devs = db.prepare('SELECT * FROM devices').all();
-  const sch = db.prepare('SELECT * FROM schedules').all();
-  const act = db.prepare('SELECT * FROM activity ORDER BY updatedAt DESC LIMIT 200').all();
+  const sch  = db.prepare('SELECT * FROM schedules').all();
+  const act  = db.prepare('SELECT * FROM activity ORDER BY updatedAt DESC LIMIT 200').all();
   res.json({ devices: devs, schedules: sch, activity: act });
 });
 
-// быстрый health со счетчиками
+// краткий health со счётчиками
 app.get('/debug/health', (_req, res) => {
   try {
     const d = db.prepare('SELECT COUNT(*) c FROM devices').get().c;
@@ -404,7 +433,7 @@ app.get('/debug/health', (_req, res) => {
   }
 });
 
-// крон-триггер
+// крон-триггер — вызывать чаще, лучше каждую минуту (POST!)
 app.post('/cron', async (_req, res) => {
   try {
     const out = await processDueNow();
@@ -415,6 +444,6 @@ app.post('/cron', async (_req, res) => {
   }
 });
 
-// ====== старт ======
+/* ===================== Старт ===================== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Server up on :' + PORT));
