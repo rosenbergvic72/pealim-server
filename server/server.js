@@ -77,26 +77,48 @@ function buildMessage(language = 'english') {
   switch ((language || '').toLowerCase()) {
     case 'русский':
     case 'ru':
-      return { title: 'Это Verbify!', body: 'Не забудь потренироваться!\nСегодня практика — завтра уверенность! 💪' };
+      return {
+        title: 'Это Verbify!',
+        body: 'Не забудь потренироваться!\nСегодня практика — завтра уверенность в общении! 💪',
+      };
     case 'français':
     case 'fr':
-      return { title: 'C’est Verbify !', body: 'N’oublie pas de t’entraîner !\nAujourd’hui entraînement — demain confiance ! 💪' };
+      return {
+        title: 'C’est Verbify !',
+        body: 'N’oublie pas de t’entraîner !\nAujourd’hui, pratique — demain, confiance dans la communication ! 💪',
+      };
     case 'español':
     case 'es':
-      return { title: '¡Esto es Verbify!', body: '¡No olvides practicar!\n¡Hoy práctica — mañana confianza! 💪' };
+      return {
+        title: '¡Esto es Verbify!',
+        body: '¡No olvides practicar!\n¡Hoy práctica — mañana confianza en la comunicación! 💪',
+      };
     case 'português':
     case 'pt':
-      return { title: 'Este é o Verbify!', body: 'Não se esqueça de praticar!\nHoje prática — amanhã confiança! 💪' };
+      return {
+        title: 'Este é o Verbify!',
+        body: 'Não se esqueça de praticar!\nHoje prática — amanhã confiança na comunicação! 💪',
+      };
     case 'العربية':
     case 'ar':
-      return { title: 'هذا هو Verbify!', body: 'لا تنسَ التدرّب!\nتمرّن اليوم — ثقة غدًا! 💪' };
+      return {
+        title: 'هذا هو Verbify!',
+        body: 'لا تَنْسَ التدريب!\nتمرَّن اليوم — ثقة في التواصل غدًا! 💪',
+      };
     case 'አማርኛ':
     case 'am':
-      return { title: 'ይህ Verbify ነው!', body: 'ማስተማርን አትርሳ!\nዛሬ ማስተማር — ነገ እምነት! 💪' };
+      return {
+        title: 'ይህ Verbify ነው!',
+        body: 'ልምምድን አትርሳ!\nዛሬ ልምምድ — ነገ በመገናኘት እርግጠኝነት! 💪',
+      };
     default:
-      return { title: 'This is Verbify!', body: 'Don’t forget to practice!\nPractice today — confidence tomorrow! 💪' };
+      return {
+        title: 'This is Verbify!',
+        body: 'Don’t forget to practice!\nPractice today — confidence in conversation tomorrow! 💪',
+      };
   }
 }
+
 
 /* ===================== Prepared statements ===================== */
 const upsertDevice = db.prepare(`
